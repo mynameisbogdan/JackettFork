@@ -1,0 +1,157 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+      - test-gha
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  JACKETT_MAJOR_VERSION: 0
+  JACKETT_MINOR_VERSION: 24
+  FRAMEWORK: net9.0
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.variables.outputs.version }}
+    steps:
+      - name: Setup variables
+        id: variables
+        shell: bash
+        run: |
+          echo "version=${{ env.JACKETT_MAJOR_VERSION }}.${{ env.JACKETT_MINOR_VERSION }}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: freebsd-x64
+            os: ubuntu-latest
+          - runtime: linux-arm64
+            os: ubuntu-latest
+          - runtime: linux-musl-arm64
+            os: ubuntu-latest
+          - runtime: linux-musl-x64
+            os: ubuntu-latest
+          - runtime: linux-x64
+            os: ubuntu-latest
+          - runtime: osx-arm64
+            os: ubuntu-latest
+          - runtime: osx-x64
+            os: ubuntu-latest
+          - runtime: win-x64
+            os: ubuntu-latest
+          - runtime: win-x86
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      JACKETT_VERSION: ${{ needs.prepare.outputs.version }}
+      RUNTIME: ${{ matrix.runtime }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+
+      - name: Setup NuGet registry source
+        shell: bash
+        if: ${{ startsWith(matrix.runtime, 'freebsd-') }}
+        run:
+          dotnet nuget add source --configfile src/nuget.config --name gh-openur https://nuget.pkg.github.com/openur/index.json --username ${{ github.repository_owner }} --password ${{ github.token }} --store-password-in-clear-text
+
+      - name: Restore packages
+        run: |
+          dotnet restore --runtime "$RUNTIME" --locked-mode src
+
+      - name: Build
+        run: |
+          dotnet publish --no-restore --configuration Release --self-contained -m:1 --framework "$FRAMEWORK" --runtime "$RUNTIME" src/Jackett.Server/Jackett.Server.csproj --output build -p:AssemblyVersion=$JACKETT_VERSION -p:FileVersion=$JACKETT_VERSION -p:InformationalVersion=$JACKETT_VERSION -p:Version=$JACKETT_VERSION
+          dotnet publish --no-restore --configuration Release --self-contained -m:1 --framework "$FRAMEWORK" --runtime "$RUNTIME" src/Jackett.Updater/Jackett.Updater.csproj --output build -p:AssemblyVersion=$JACKETT_VERSION -p:FileVersion=$JACKETT_VERSION -p:InformationalVersion=$JACKETT_VERSION -p:Version=$JACKETT_VERSION
+
+      - name: Build Windows Specific
+        if: startsWith(matrix.runtime, 'win-')
+        run: |
+          dotnet publish --no-restore --configuration Release --self-contained -m:1 --framework "${FRAMEWORK}-windows" --runtime "$RUNTIME" src/Jackett.Tray/Jackett.Tray.csproj --output build -p:AssemblyVersion=$JACKETT_VERSION -p:FileVersion=$JACKETT_VERSION -p:InformationalVersion=$JACKETT_VERSION -p:Version=$JACKETT_VERSION
+          dotnet publish --no-restore --configuration Release --self-contained -m:1 --framework "${FRAMEWORK}-windows" --runtime "$RUNTIME" src/Jackett.Service/Jackett.Service.csproj --output build -p:AssemblyVersion=$JACKETT_VERSION -p:FileVersion=$JACKETT_VERSION -p:InformationalVersion=$JACKETT_VERSION -p:Version=$JACKETT_VERSION
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.runtime }}
+          path: build/*
+          if-no-files-found: error
+
+  package:
+    needs: backend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: freebsd-x64
+            os: ubuntu-latest
+          - runtime: linux-arm64
+            os: ubuntu-latest
+          - runtime: linux-musl-arm64
+            os: ubuntu-latest
+          - runtime: linux-musl-x64
+            os: ubuntu-latest
+          - runtime: linux-x64
+            os: ubuntu-latest
+          - runtime: osx-arm64
+            os: ubuntu-latest
+          - runtime: osx-x64
+            os: ubuntu-latest
+          - runtime: win-x64
+            os: ubuntu-latest
+          - runtime: win-x86
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: build/Jackett
+          pattern: build-${{ matrix.runtime }}
+
+      - name: Copy Windows Specific Scripts
+        if: startsWith(matrix.runtime, 'win-')
+        run: |
+          install -m 755 jackett_launcher.bat ./build/Jackett/
+
+      - name: Copy macOS Specific Scripts
+        if: startsWith(matrix.runtime, 'osx-')
+        run: |
+          install -m 755 install_service_macos ./build/Jackett/
+          install -m 755 uninstall_jackett_macos ./build/Jackett/
+
+      - name: Copy Linux Specific Scripts
+        if: startsWith(matrix.runtime, 'linux-')
+        run: |
+          install -m 755 install_service_systemd.sh ./build/Jackett/
+          install -m 755 jackett_launcher.sh ./build/Jackett/
+
+      - name: Setting permissions
+        if: ${{ !startsWith(matrix.runtime, 'win-') }}
+        run: |
+          find ./build/Jackett -type d -exec chmod 755 {} \;
+          find ./build/Jackett -type f -exec chmod 644 {} \;
+          find ./build/Jackett -name "jackett" -exec chmod 755 {} \;
+          find ./build/Jackett -name "JackettUpdater" -exec chmod 755 {} \;
+
+      - run: ls -lha ./build/Jackett/
