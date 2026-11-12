@@ -1,0 +1,82 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+      - test-gha
+  pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  JACKETT_MAJOR_VERSION: 0
+  JACKETT_MINOR_VERSION: 24
+  FRAMEWORK: net9.0
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.variables.outputs.version }}
+    steps:
+      - name: Setup variables
+        id: variables
+        shell: bash
+        run: |
+          echo "version=${{ env.JACKETT_MAJOR_VERSION }}.${{ env.JACKETT_MINOR_VERSION }}.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: linux-arm64
+            os: ubuntu-latest
+          - runtime: linux-musl-arm64
+            os: ubuntu-latest
+          - runtime: linux-musl-x64
+            os: ubuntu-latest
+          - runtime: linux-x64
+            os: ubuntu-latest
+          - runtime: osx-arm64
+            os: ubuntu-latest
+          - runtime: osx-x64
+            os: ubuntu-latest
+          - runtime: win-x64
+            os: ubuntu-latest
+          - runtime: win-x86
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+
+      - name: Restore packages
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          dotnet restore --runtime $RUNTIME --locked-mode src
+
+      - name: Build
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          dotnet publish --no-restore --configuration Release --self-contained --framework ${{ env.FRAMEWORK }} --runtime $RUNTIME -m:1 src/Jackett.Server/Jackett.Server.csproj
+          dotnet publish --no-restore --configuration Release --self-contained --framework ${{ env.FRAMEWORK }} --runtime $RUNTIME -m:1 src/Jackett.Updater/Jackett.Updater.csproj
+
+      - name: Build (Windows only)
+        if: startsWith(matrix.runtime, 'win-')
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          dotnet publish --no-restore --configuration Release --self-contained --framework ${{ env.FRAMEWORK }}-windows --runtime $RUNTIME -m:1 src/Jackett.Tray/Jackett.Tray.csproj
+          dotnet publish --no-restore --configuration Release --self-contained --framework ${{ env.FRAMEWORK }}-windows --runtime $RUNTIME -m:1 src/Jackett.Service/Jackett.Service.csproj
